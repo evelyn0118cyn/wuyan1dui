@@ -1,0 +1,22 @@
+{
+  "name": "wuyanyidui",
+  "version": "1.0.0",
+  "private": true,
+  "description": "无言以队 · 舞弊审计调查辅助台（金融业舞弊审计调查岗位 AI 工作助理）",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "build": "node tools/build.js",
+    "test": "node tools/selftest.js",
+    "test:api": "node tools/apitest.js",
+    "test:browser": "node tools/browsertest.js"
+  },
+  "dependencies": {
+    "mysql2": "^3.11.0"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "license": "UNLICENSED"
+}
