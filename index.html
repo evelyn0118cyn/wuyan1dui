@@ -3189,7 +3189,7 @@ td.mono { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
   }
-  const rnd = mulberry32(20261102);
+  let rnd = mulberry32(20261102);
   const R = (min, max) => min + rnd() * (max - min);
   const RI = (min, max) => Math.floor(R(min, max + 1));
   const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
@@ -3455,6 +3455,7 @@ td.mono { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
    * 构建数据集
    * ============================================================ */
   function build() {
+    rnd = mulberry32(20261102); /* fixed seed reset: every analysis is reproducible */
     const D = {
       subjects: [], cost_centers: [], departments: [], employees: [], products: [],
       customers: [], suppliers: [], tax_rates: [], projects: [], bank_accounts: [],
@@ -4377,7 +4378,7 @@ td.mono { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
       module: 'data_aggregate', title: '上传辅助数据解析',
       files: parsed, totalRows, notes,
       defaultStartDate: '', defaultDateSource: '',
-      usage: '上传数据用于辅助分析：可作为线索补充材料、外部对账单、举报材料整理表等。它不会替代数据库数据，也不参与规则命中判断。',
+      usage: '上传数据有两种用途：①辅助材料预览（本摘要仅展示解析结果与溯源，不参与规则命中判断）；②在下方「导入为业务数据」中完成列映射后覆盖同名业务表，即参与规则引擎命中判断。两种方式均不写入业务库，仅当前会话有效。',
       disclaimer: DISCLAIMER_LONG,
       trace: trace([], { files: files.map((f) => f.name) }, [], { uploaded: tables })
     };
@@ -7544,6 +7545,7 @@ td.mono { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
       + '<input type="file" id="up_file" accept=".csv,.xlsx,.xls,text/csv" multiple style="display:none">'
       + '</div>';
     h += '<div class="up-files" id="up_files"></div>';
+    h += '<div id="up_imports"></div>';
     h += '<div id="up_result"></div>';
     h += '</div>';
     return h;
@@ -7567,6 +7569,7 @@ td.mono { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
         STATE.uploads = STATE.uploads.concat(ok);
         Wy.store.set('uploadsMeta', STATE.uploads.map(function (f) { return { name: f.name, rows: f.rows.length }; }));
         paintUploadFiles(host);
+        renderImportPanels(host, ok);
         Wy.toast('已导入 ' + ok.length + ' 个文件，共 ' + ok.reduce(function (a, f) { return a + f.rows.length; }, 0) + ' 行（仅本次会话）', 'ok');
         /* 输出解析摘要（表 + 溯源），构成本次上传的结构化"输出形式" */
         Wy.api.call('upload', { files: STATE.uploads }).then(function (r) {
@@ -7580,7 +7583,7 @@ td.mono { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
           }
           h += '<div id="up_sum_table"></div>'
             + notice(U.esc(r.usage), 'info')
-            + '<div style="margin-top:8px">' + Wy.renderTrace(r.trace, { extra: ['上传数据不参与规则命中判断'] }) + '</div>'
+            + '<div style="margin-top:8px">' + Wy.renderTrace(r.trace, { extra: ['本摘要仅为辅助材料预览；如需参与规则命中，请使用下方「导入为业务数据」'] }) + '</div>'
             + '</div>';
           rid.innerHTML = h;
           Wy.bindTrace(rid);
@@ -7643,6 +7646,282 @@ td.mono { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
         if (rid) rid.innerHTML = '';
         paintUploadFiles(host);
       });
+    });
+  }
+
+  /* ============================================================
+   * 外部数据导入：CSV/Excel → 列映射为 26 张业务表 → 叠加分析数据集
+   * 闭环：导入后自动运行"风险信号识别"，即可用真实外部数据驱动分析。
+   * 说明：导入数据仅存于服务端内存（重启即清空），需连接后端服务（本机/局域网/云部署）。
+   * ============================================================ */
+  (function () {
+    if (document.getElementById('imp_style')) return;
+    var s = document.createElement('style'); s.id = 'imp_style';
+    s.textContent = '.imp-card{border:1px solid #e3e8ef;border-radius:10px;padding:10px 12px;margin:10px 0;background:#fafbfc}'
+      + '.imp-head{font-weight:600;font-size:13px;margin-bottom:6px}'
+      + '.imp-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}'
+      + '.imp-row label{font-size:12px;color:#555}'
+      + '.imp-table{margin-left:4px;padding:3px 6px;border:1px solid #cfd6e0;border-radius:6px;max-width:240px}'
+      + '.imp-hint{font-size:11px;color:#89a}'
+      + '.imp-cols{display:grid;grid-template-columns:1fr 1fr;gap:4px 14px;margin:6px 0}'
+      + '.imp-map{display:flex;align-items:center;gap:6px;font-size:12px}'
+      + '.imp-src{color:#334;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'
+      + '.imp-arrow{color:#9aa}'
+      + '.imp-target{padding:2px 4px;border:1px solid #cfd6e0;border-radius:5px;max-width:180px}'
+      + '.imp-actions{display:flex;gap:8px;margin-top:4px}'
+      + '.imp-run,.imp-only{padding:5px 12px;border-radius:7px;border:1px solid #cdd;border:none;cursor:pointer;font-size:12.5px}'
+      + '.imp-run{background:#2f6df6;color:#fff}.imp-only{background:#eef1f6;color:#334}'
+      + '.imp-msg{font-size:12px;margin-top:6px}.imp-msg.ok{color:#1a9d54}.imp-msg.err{color:#d23}.imp-msg.warn{color:#c80}';
+    document.head.appendChild(s);
+  })();
+
+  /* 26 张业务表的字段（用于列映射下拉与自动识别） */
+  var TABLE_FIELDS = {
+    subjects:['id','subject_code','subject_name','subject_type','parent_code','dc_direction','is_enabled','created_at'],
+    cost_centers:['id','cc_code','cc_name','dept_code','cc_type','created_at'],
+    departments:['id','dept_code','dept_name','parent_dept_code','manager_emp_code','created_at'],
+    employees:['id','emp_code','emp_name','dept_code','position','id_card','bank_account','hire_date','created_at'],
+    products:['id','product_code','product_name','category','unit','unit_price','tax_rate_code','spec','created_at'],
+    customers:['id','customer_code','customer_name','tax_no','contact','phone','address','credit_rating','created_at'],
+    suppliers:['id','supplier_code','supplier_name','tax_no','contact','phone','address','payment_terms','created_at'],
+    tax_rates:['id','tax_rate_code','tax_rate','description','created_at'],
+    projects:['id','project_code','project_name','dept_code','project_type','budget','start_date','end_date','status','created_at'],
+    bank_accounts:['id','account_no','bank_name','account_type','currency','created_at'],
+    gl_vouchers:['id','voucher_no','voucher_date','voucher_type','summary','source_system','source_ref','total_debit','total_credit','maker','reviewer','status','created_at'],
+    gl_ledger:['id','subject_code','period','entry_date','voucher_id','summary','debit_amount','credit_amount','balance','created_at'],
+    gl_voucher_entries:['id','voucher_id','entry_line','subject_code','summary','debit_amount','credit_amount','cost_center','project_code','created_at'],
+    oa_expense_reports:['id','report_no','emp_code','dept_code','expense_type','amount','submit_date','status','voucher_id','description','created_at'],
+    oa_approval_records:['id','report_id','approver_code','approver_name','step','action','comment','action_time','created_at'],
+    pur_orders:['id','po_no','supplier_code','contract_no','order_date','total_amount','tax_amount','grand_total','status','maker','created_at'],
+    pur_contracts:['id','contract_no','supplier_code','contract_name','total_amount','sign_date','start_date','end_date','status','created_at'],
+    pur_order_items:['id','po_id','line_no','product_code','product_name','quantity','unit','unit_price','tax_rate','amount','tax_amount','created_at'],
+    pur_receipts:['id','receipt_no','po_id','receipt_date','total_amount','voucher_id','status','created_at'],
+    sal_orders:['id','so_no','customer_code','order_date','total_amount','tax_amount','grand_total','status','sales_emp','created_at'],
+    sal_deliveries:['id','delivery_no','so_id','delivery_date','total_amount','voucher_id','status','created_at'],
+    sal_order_items:['id','so_id','line_no','product_code','product_name','quantity','unit','unit_price','tax_rate','amount','tax_amount','created_at'],
+    bank_transactions:['id','bank_tx_id','account_no','tx_date','tx_time','tx_type','amount','counterparty','counterparty_account','channel','summary','voucher_id','matched','created_at'],
+    tax_invoice_pool:['id','invoice_no','invoice_type','invoice_date','party_code','party_name','amount','tax_rate','tax_amount','total_amount','source_ref','voucher_id','status','created_at'],
+    rd_timesheets:['id','emp_code','project_code','cost_center','work_date','hours','hourly_rate','labor_cost','description','created_at'],
+    tax_vat_declarations:['id','declaration_period','output_amount','output_tax','input_amount','input_tax','payable_tax','actual_paid','status','voucher_id','created_at']
+  };
+  /* 文件名关键词 → 目标表（用于自动识别） */
+  var TABLE_HINTS = {
+    subjects:['科目','subject'], bank_transactions:['银行','流水','bank','transaction'],
+    pur_orders:['采购','订单','purchase','po'], pur_contracts:['合同','contract'],
+    pur_order_items:['采购明细','订单明细'], pur_receipts:['入库','收货','receipt'],
+    sal_orders:['销售','订单','sale','so'], sal_order_items:['销售明细'], sal_deliveries:['发货','出库','delivery'],
+    suppliers:['供应商','supplier','供方'], customers:['客户','customer'], employees:['员工','employee','人员'],
+    gl_vouchers:['凭证','voucher'], gl_voucher_entries:['凭证分录','分录'], gl_ledger:['总账','ledger'],
+    oa_expense_reports:['费用','报销','expense'], oa_approval_records:['审批','approval'],
+    tax_invoice_pool:['发票','invoice'], tax_vat_declarations:['增值税','申报','vat'],
+    products:['产品','物料','product'], projects:['项目','project'], cost_centers:['成本中心','cost'],
+    departments:['部门','dept'], tax_rates:['税率','tax'], bank_accounts:['银行账户','bankaccount'],
+    rd_timesheets:['工时','timesheet','研发']
+  };
+  /* 目标列 → 别名（用于表头自动匹配） */
+  var COLUMN_ALIASES = {
+    id:['id','编号','序号','主键','行号','no'], voucher_no:['凭证号','凭证字号','记账凭证号','vno'],
+    voucher_date:['凭证日期','记账日期','制单日期','日期'], voucher_type:['凭证类型','凭证字','类型'],
+    summary:['摘要','业务摘要','说明','备注','事由'], source_system:['来源系统','系统'],
+    source_ref:['业务单号','来源单据','关联单号'], total_debit:['借方合计','借方金额','借方','debit'],
+    total_credit:['贷方合计','贷方金额','贷方','credit'], maker:['制单','制单人','录入人','填制'],
+    reviewer:['审核','审核人','复核'], status:['状态','标志'],
+    supplier_code:['供应商编码','供应商代码','供方编码','scode'], supplier_name:['供应商名称','供应商','供方名称','单位名称'],
+    customer_code:['客户编码','客户代码','客编'], customer_name:['客户名称','客户'],
+    contract_no:['合同号','合同编号','合同'], order_date:['订单日期','下单日期','日期'],
+    po_no:['订单号','采购订单号','采购单号','pono'], so_no:['销售订单号','销售单号','sono'],
+    total_amount:['金额','总金额','订单金额','价税合计','合计','金额合计','总价','amount','amt'],
+    tax_amount:['税额','税'], grand_total:['价税合计','总计','总金额','total'],
+    product_code:['产品编码','物料编码','货号'], product_name:['产品名称','品名','商品名称'],
+    quantity:['数量','件数','qty'], unit:['单位'], unit_price:['单价','价格'],
+    tax_rate:['税率'], bank_tx_id:['流水号','交易流水号','交易序号','txn_id'],
+    account_no:['账号','本方账号','账户','银行账户','acct'], bank_name:['开户行','银行名称'],
+    tx_date:['日期','交易日期','记账日期','交易日','发生日期'], tx_time:['时间','交易时间'],
+    tx_type:['类型','收付类型','借贷','方向','收付款方向'], amount:['金额','交易金额','发生额','收支金额'],
+    counterparty:['对方户名','交易对手','收款人','付款人','对方名称','对方单位'],
+    counterparty_account:['对方账号','对手账号','对方账户','对方银行账号'], channel:['渠道','通道','结算方式'],
+    voucher_id:['凭证号','关联凭证','凭证id'], matched:['匹配','是否匹配'],
+    emp_code:['工号','员工编码','员工号','职员编码'], emp_name:['员工姓名','姓名','员工'],
+    expense_type:['费用类型','费用类别','报销类型'], report_no:['报销单号','单据号','费用单号'],
+    invoice_no:['发票号','发票号码','发票编号','发票代码'], invoice_date:['发票日期','开票日期'],
+    invoice_type:['发票类型','票据类型'], party_code:['对方编码','对方id'], party_name:['对方名称','开票方'],
+    tax_rate_code:['税率代码'], project_code:['项目编码','项目号','项目代码'], project_name:['项目名称'],
+    cost_center:['成本中心','成本中心编码'], subject_code:['科目编码','会计科目','科目'],
+    subject_name:['科目名称'], entry_date:['入账日期','记账日'], debit_amount:['借方金额','借方','借'],
+    credit_amount:['贷方金额','贷方','贷'], balance:['余额'], period:['期间','会计期间','会计月'],
+    payment_terms:['付款条件','账期'], contact:['联系人','电话','手机','联系电话'], address:['地址'],
+    tax_no:['税号','纳税人识别号','统一社会信用代码'], hire_date:['入职日期','雇佣日期'],
+    position:['职位','岗位','职务'], budget:['预算','预算金额'], hours:['工时','小时'],
+    hourly_rate:['时薪','小时费率'], labor_cost:['人工成本','人工费'], work_date:['工作日期'],
+    output_amount:['销项金额','销售收入'], output_tax:['销项税额','销项税'], input_amount:['进项金额','采购金额'],
+    input_tax:['进项税额','进项税'], payable_tax:['应纳税额','应缴税额'], actual_paid:['实缴税额','已缴'],
+    declaration_period:['申报期间','属期'], receipt_no:['入库单号','收货单号','入库编号'],
+    receipt_date:['入库日期','收货日期'], delivery_no:['发货单号','出库单号'], delivery_date:['发货日期','出库日期'],
+    sales_emp:['业务员','销售员','销售人员'], line_no:['行号','序号'], entry_line:['分录行','行次'],
+    po_id:['采购订单id','订单内码'], so_id:['销售订单id'], contract_name:['合同名称'],
+    sign_date:['签订日期','签署日期'], start_date:['开始日期','起始日'], end_date:['结束日期','截止日'],
+    approver_code:['审批人编码','审批人'], approver_name:['审批人姓名','审批人名称'],
+    step:['审批步骤','节点'], action:['审批动作','操作'], comment:['审批意见'], action_time:['审批时间','处理时间'],
+    manager_emp_code:['部门经理','经理'], parent_dept_code:['上级部门'], parent_code:['上级编码'],
+    dc_direction:['余额方向','借贷方向'], is_enabled:['是否启用','启用'], credit_rating:['信用等级','评级'],
+    cc_type:['成本中心类型'], cc_code:['成本中心编码'], cc_name:['成本中心名称'],
+    dept_code:['部门编码','部门代码'], dept_name:['部门名称','部门'], category:['类别','分类'],
+    spec:['规格','型号'], description:['描述','说明'], created_at:['创建时间','录入时间','生成时间']
+  };
+
+  function getTableOptions(selected) {
+    return Object.keys(TABLE_FIELDS).map(function (t) {
+      return '<option value="' + t + '"' + (t === selected ? ' selected' : '') + '>' + t + '</option>';
+    }).join('');
+  }
+  function colOptions(table, selected) {
+    var list = TABLE_FIELDS[table] || [];
+    var h = '<option value="">— 忽略 —</option>';
+    list.forEach(function (c) { h += '<option value="' + c + '"' + (c === selected ? ' selected' : '') + '>' + c + '</option>'; });
+    return h;
+  }
+  function autoDetectTable(fileName, headers) {
+    var fn = (fileName || '').toLowerCase();
+    var score = {};
+    Object.keys(TABLE_FIELDS).forEach(function (t) {
+      var s = 0;
+      if (fn.indexOf(t.toLowerCase().replace(/_/g, '')) >= 0) s += 5;
+      (TABLE_HINTS[t] || []).forEach(function (hh) { if (fn.indexOf(hh) >= 0) s += 3; });
+      headers.forEach(function (h) {
+        var hl = (h || '').toLowerCase().replace(/_/g, '');
+        if (hl && (t.toLowerCase().replace(/_/g, '') === hl)) s += 2;
+      });
+      if (s > 0) score[t] = s;
+    });
+    var best = null, bv = 0;
+    Object.keys(score).forEach(function (k) { if (score[k] > bv) { bv = score[k]; best = k; } });
+    return best;
+  }
+  function buildColumnMapping(headers, table) {
+    var cols = TABLE_FIELDS[table] || [];
+    return headers.map(function (h) {
+      var hl = (h || '').trim().toLowerCase();
+      var hit = '';
+      cols.forEach(function (c) {
+        if (hit) return;
+        var cl = c.toLowerCase();
+        var aliases = (COLUMN_ALIASES[c] || []).map(function (a) { return a.toLowerCase(); });
+        if (!hl) return;
+        if (hl === cl || aliases.indexOf(hl) >= 0) hit = c;
+        else if (hl.indexOf(cl) >= 0 || cl.indexOf(hl) >= 0) hit = c;
+        else { aliases.forEach(function (a) { if (hl.indexOf(a) >= 0 || a.indexOf(hl) >= 0) hit = c; }); }
+      });
+      return { orig: h, target: hit };
+    });
+  }
+  function renderMapRows(map, table) {
+    return map.map(function (m) {
+      return '<div class="imp-map"><span class="imp-src" title="' + U.esc(m.orig) + '">' + U.esc(m.orig) + '</span>'
+        + '<span class="imp-arrow">→</span>'
+        + '<select class="imp-target" data-orig="' + U.esc(m.orig) + '">' + colOptions(table, m.target) + '</select></div>';
+    }).join('');
+  }
+  function doImport(file, card, table, cardId, runAnalysis) {
+    var msg = card.querySelector('#' + cardId + '_msg');
+    msg.className = 'imp-msg'; msg.textContent = '导入中…';
+    var map = {};
+    card.querySelectorAll('.imp-target').forEach(function (s) {
+      var o = s.getAttribute('data-orig'); var t = s.value;
+      if (t) map[o] = t;
+    });
+    var rows = file.rows.map(function (r) {
+      var nr = {};
+      Object.keys(map).forEach(function (o) {
+        var v = r[o]; if (v == null) return;
+        if (typeof v === 'string') v = v.trim();
+        if (v === '') return;
+        nr[map[o]] = v;
+      });
+      return nr;
+    }).filter(function (r) { return Object.keys(r).length > 0; });
+    if (!rows.length) { msg.className = 'imp-msg warn'; msg.textContent = '没有可映射的数据列，请检查列映射。'; return; }
+    var base = window.__API_BASE__ || location.origin;
+
+    /* 无后端环境（file:// / 静态站 / 后端未启动）：浏览器内存叠加层，导入即参与分析 */
+    var doLocalImport = function () {
+      try {
+        if (!window.__LOCAL_IMPORT__) throw new Error('离线导入模块未加载');
+        var added = window.__LOCAL_IMPORT__.set(table, rows, false);
+        msg.className = 'imp-msg ok';
+        msg.innerHTML = '✓ 已离线导入 ' + added + ' 行到「' + U.esc(table) + '」'
+          + '（无后端模式，数据仅在本页内存，刷新后清空）'
+          + (runAnalysis ? '，正在运行分析…' : '');
+        if (window.__localImportStatus) {
+          try { window.__localImportStatus(document.getElementById('up_imports')); } catch (e) {}
+        }
+        if (runAnalysis) {
+          try {
+            if (typeof go === 'function') go('risk');
+            setTimeout(function () { try { MODULES.risk.run(); } catch (e) { console.error(e); } }, 200);
+          } catch (e) { console.error(e); }
+        }
+      } catch (e) {
+        msg.className = 'imp-msg err';
+        msg.textContent = '离线导入失败：' + (e && e.message ? e.message : e);
+      }
+    };
+    if (location.protocol === 'file:' || !base || base === 'null' || base.indexOf('http') !== 0) {
+      doLocalImport();
+      return;
+    }
+
+    fetch(base + '/api/import', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ table: table, rows: rows, replace: false })
+    }).then(function (res) {
+      return res.json().then(function (j) { return { ok: res.ok, j: j }; });
+    }).then(function (o) {
+      if (!o.ok || !o.j.ok) { msg.className = 'imp-msg err'; msg.textContent = '导入失败：' + ((o.j && o.j.error) || '服务端错误'); return; }
+      msg.className = 'imp-msg ok';
+      msg.innerHTML = '✓ 已导入 ' + o.j.rows + ' 行到「' + U.esc(table) + '」' + (runAnalysis ? '，正在运行分析…' : '');
+      if (runAnalysis) {
+        try {
+          if (typeof go === 'function') go('risk');
+          setTimeout(function () { try { MODULES.risk.run(); } catch (e) { console.error(e); } }, 200);
+        } catch (e) { console.error(e); }
+      }
+    }).catch(function () {
+      /* 后端不可达：自动降级为浏览器内离线导入（不会报 Failed to fetch） */
+      doLocalImport();
+    });
+  }
+  function renderImportCard(host, file) {
+    var headers = file.rows.length ? Object.keys(file.rows[0]) : [];
+    if (!headers.length) return;
+    var box = host.querySelector('#up_imports');
+    if (!box) return;
+    var table = autoDetectTable(file.name, headers) || 'bank_transactions';
+    var map = buildColumnMapping(headers, table);
+    var cardId = 'imp_' + Math.random().toString(36).slice(2, 8);
+    var card = document.createElement('div'); card.className = 'imp-card';
+    card.innerHTML = '<div class="imp-head">📥 导入「' + U.esc(file.name) + '」为业务数据（' + file.rows.length + ' 行）</div>'
+      + '<div class="imp-row"><label>目标业务表</label><select class="imp-table">' + getTableOptions(table) + '</select>'
+      + '<span class="imp-hint">导入后覆盖同名演示/数据库表，并在分析中直接使用</span></div>'
+      + '<div class="imp-cols" id="' + cardId + '_cols">' + renderMapRows(map, table) + '</div>'
+      + '<div class="imp-actions"><button class="imp-run">导入并分析</button><button class="imp-only">仅导入数据</button></div>'
+      + '<div class="imp-msg" id="' + cardId + '_msg"></div>';
+    box.appendChild(card);
+    var sel = card.querySelector('.imp-table');
+    sel.addEventListener('change', function () {
+      var t = sel.value;
+      card.querySelector('#' + cardId + '_cols').innerHTML = renderMapRows(buildColumnMapping(headers, t), t);
+    });
+    card.querySelector('.imp-only').addEventListener('click', function () { doImport(file, card, sel.value, cardId, false); });
+    card.querySelector('.imp-run').addEventListener('click', function () { doImport(file, card, sel.value, cardId, true); });
+  }
+  function renderImportPanels(host, files) {
+    var box = host.querySelector('#up_imports');
+    if (!box) return;
+    if (window.__localImportStatus) { try { window.__localImportStatus(box); } catch (e) {} }
+    var shown = box.__shown || (box.__shown = {});
+    (files || []).forEach(function (f) {
+      if (shown[f.name]) return; shown[f.name] = true;
+      renderImportCard(host, f);
     });
   }
 
@@ -9439,6 +9718,99 @@ td.mono { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
   root.WyApp = { go: go, render: render, STATE: STATE, modules: MODULES };
 })(window);
 
+</script>
+
+<script>
+/* ============================================================
+ * 无后端模式（file:// / GitHub Pages 静态站）离线导入叠加层
+ * 上传的 CSV/Excel 覆盖同名演示表，直接参与本地规则引擎分析。
+ * 数据仅存于本页内存，刷新/关闭页面即清空，不落盘、不写库。
+ * ============================================================ */
+(function () {
+  window.__LOCAL_IMPORT__ = { tables: {} };
+
+  window.__LOCAL_IMPORT__.set = function (table, rows, replace) {
+    var meta = window.WyCore && window.WyCore.TABLE_META;
+    if (!meta || !meta[table]) throw new Error('未知业务表：' + table);
+    var norm = (rows || []).map(function (r) {
+      var o = {};
+      Object.keys(r || {}).forEach(function (k) {
+        var key = String(k).trim();
+        if (!key) return;
+        var v = r[k];
+        if (typeof v === 'string') v = v.trim();
+        if (v === '' || v == null) return;
+        o[key] = v;
+      });
+      return o;
+    }).filter(function (r) { return Object.keys(r).length > 0; });
+    if (!norm.length) throw new Error('数据行为空');
+    if (norm.length > 5000) norm = norm.slice(0, 5000);
+    var t = window.__LOCAL_IMPORT__.tables;
+    t[table] = replace ? norm : (t[table] || []).concat(norm);
+    return t[table].length;
+  };
+  window.__LOCAL_IMPORT__.clear = function () { window.__LOCAL_IMPORT__.tables = {}; };
+  window.__LOCAL_IMPORT__.stats = function () {
+    var t = window.__LOCAL_IMPORT__.tables;
+    return { tables: Object.keys(t).length,
+      rows: Object.keys(t).reduce(function (a, k) { return a + t[k].length; }, 0) };
+  };
+
+  /* 包装 WyDemo.build()：每次分析前把离线导入的表覆盖进数据集 */
+  function installOverlay() {
+    if (!window.WyDemo || typeof window.WyDemo.build !== 'function') return false;
+    if (window.WyDemo.__localImportWrapped) return true;
+    var origBuild = window.WyDemo.build;
+    window.WyDemo.build = function () {
+      var D = origBuild.apply(this, arguments);
+      try {
+        var t = window.__LOCAL_IMPORT__.tables;
+        Object.keys(t).forEach(function (name) {
+          if (Object.prototype.hasOwnProperty.call(D, name)) D[name] = t[name].slice();
+        });
+      } catch (e) { console.warn('[local-import] overlay failed', e); }
+      return D;
+    };
+    window.WyDemo.__localImportWrapped = true;
+    return true;
+  }
+  if (!installOverlay()) document.addEventListener('DOMContentLoaded', installOverlay);
+
+  /* 上传区下方的离线导入状态条 */
+  window.__localImportStatus = function (box) {
+    if (!box) return;
+    var bar = box.querySelector('.imp-local-status');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.className = 'imp-local-status';
+      box.insertBefore(bar, box.firstChild);
+    }
+    var s = window.__LOCAL_IMPORT__.stats();
+    bar.style.cssText = 'font-size:12.5px;line-height:1.7;padding:8px 10px;margin:2px 0 8px;border:1px dashed #c9d4e6;border-radius:8px;background:#f7faff;color:#33415c';
+    bar.innerHTML = '离线导入叠加层：已覆盖 <b>' + s.tables + '</b> 张业务表 / <b>' + s.rows
+      + '</b> 行，下一次运行分析即生效（仅本页内存，刷新清空）。'
+      + ' <button type="button" id="imp_local_clear" style="margin-left:8px;padding:2px 10px;border:1px solid #b9c6dd;border-radius:6px;background:#fff;cursor:pointer;font-size:12px">清除导入数据</button>';
+    var btn = bar.querySelector('#imp_local_clear');
+    if (btn) btn.addEventListener('click', function () {
+      window.__LOCAL_IMPORT__.clear();
+      window.__localImportStatus(box);
+      if (window.Wy && Wy.toast) Wy.toast('已清除离线导入数据，恢复演示数据集', 'ok');
+    });
+  };
+})();
+</script>
+
+<script>
+/* file:// 防呆提示：直接双击 index.html 打开时，提示应改用本地服务地址 */
+(function () {
+  if (location.protocol !== 'file:') return;
+  var bar = document.createElement('div');
+  bar.setAttribute('style', 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#b45309;color:#fff;font:14px/1.6 -apple-system,"Microsoft YaHei",sans-serif;padding:10px 16px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.25)');
+  bar.innerHTML = '当前以本地文件 (file://) 方式打开：演示数据、离线智能体（26 条知识库问答）、CSV/Excel 导入分析均可直接使用；仅「大模型在线对话」与「连接外部 MySQL」需要后端。完整功能请双击 start.bat 后访问 <a href="http://127.0.0.1:3001/index.html" style="color:#fff;font-weight:700;text-decoration:underline">http://127.0.0.1:3001/index.html</a>。文件本身没有损坏，此提示与文件完整性无关。';
+  function mount() { document.body.insertBefore(bar, document.body.firstChild); }
+  if (document.body) mount(); else document.addEventListener('DOMContentLoaded', mount);
+})();
 </script>
 
 </body>
